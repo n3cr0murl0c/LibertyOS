@@ -1,33 +1,84 @@
-# Liberty OS Operative System
+# LibertyOS
 
-## Bootloader
+> A hybrid OS built on the Linux kernel that natively hosts Win32 applications, Windows drivers, and kernel-level anti-cheat — **without** visible virtualization or emulation layers.
 
-The first stage of the boot process. It loads the kernel into memory and sets up the system for the rest of the boot process.
+## Thesis
 
-## Device Drivers
+Run demanding Windows games (GTA 6 class) on lightweight or aging hardware while keeping Linux's security posture and shedding Windows' malware surface. No Wine prefix friction. No "compatibility layer" UX. `.exe` runs as a first-class LibertyOS process.
 
-The lowest software layer. These specialized modules translate generic OS commands into specific instructions that your hardware (GPU, network cards, disks) can execute.
+## Architecture at a glance
 
-## The Kernel
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  Shell (GUI/CLI) — native LibertyOS desktop                 │
+├─────────────────────────────────────────────────────────────┤
+│  Win32 Userspace Runtime (Wine fork, hardened)              │
+│  ─ binfmt_misc PE loader: .exe → native process             │
+├─────────────────────────────────────────────────────────────┤
+│  NT Syscall Personality Layer    │  POSIX syscalls          │
+│  ─ Object Manager → fd/inode map │  ─ standard Linux ABI    │
+│  ─ Handle table translation      │                          │
+│  ─ Security descriptor → LSM     │                          │
+├─────────────────────────────────────────────────────────────┤
+│  Graphics: Vulkan (native)  │  DX12 → VKD3D-Proton 3.0      │
+├─────────────────────────────────────────────────────────────┤
+│  Hardened Linux Kernel (LSM, BORE scheduler, io_uring)      │
+│  ─ eBPF syscall interception                                │
+├─────────────────────────────────────────────────────────────┤
+│  VT-x Micro-Hypervisor                                      │
+│  ─ EPT-isolated compartments for WDM anti-cheat drivers     │
+│  ─ Inverts AC's own VMX technique against the AC itself     │
+├─────────────────────────────────────────────────────────────┤
+│  Hardware (TPM-backed attestation for remote trust)         │
+└─────────────────────────────────────────────────────────────┘
+```
 
-The central brain of the OS. It operates securely in the background, bridging software applications with the physical hardware via system calls.
+## Phased build order
 
-## Memory Management
+| Phase | Component                                   | Goal                                                                                                                    |
+| ----- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 1     | Hardened Linux kernel foundation            | Baseline: LSM stack, BORE scheduler, io_uring, locked-down attack surface                                               |
+| 2     | NT syscall personality module               | Map NT Executive semantics (Object Manager, handle tables, security descriptors) onto Linux primitives                  |
+| 3     | Win32 userspace runtime                     | Forked Wine, integrated with `binfmt_misc` PE loader — `.exe` launches as a native process                              |
+| 4     | VT-x driver compartments                    | Micro-hypervisor with EPT isolation; host Windows kernel drivers safely                                                 |
+| 5a    | Anti-cheat: BattlEye Linux opt-in           | Pragmatic near-term path — use the vendor-supported Linux build                                                         |
+| 5b    | Anti-cheat: WDM hosting in VT-x compartment | Long-term path — run `BEDaisy.sys` & co. in VMX non-root Ring-0 with EPT blocking access to LibertyOS kernel structures |
+| 6     | TPM-backed remote attestation               | Architecturally sound long-term anti-cheat trust model                                                                  |
 
-A subsystem within the kernel that controls physical RAM and virtual memory. It allocates memory blocks to active processes and ensures programs remain isolated from one another.
+## Key design decisions
 
-## Process Management (Scheduler)
+**Graphics — Vulkan native, DX12 transparent.** Vulkan is the system API: open standard, lower CPU overhead, better behavior on weaker hardware. DX12 titles route through VKD3D-Proton 3.0 with no user-visible step.
 
-Determines which active application gets CPU time and for how long. It rapidly switches context between tasks to create the illusion of simultaneous execution.
+**Anti-cheat sandboxing — invert their own weapon.** Modern kernel anti-cheats use VT-x to inspect the system from below. LibertyOS uses the same technique on _them_: the AC driver runs in a VMX non-root Ring-0 compartment with EPT mappings that allow read access to game process memory but block access to LibertyOS kernel structures. The AC sees what it needs to function; it cannot see (or compromise) the host kernel.
 
-## File System
+**`.exe` execution — no visible compat layer.** `binfmt_misc` registers a PE handler that hands off to the Win32 runtime. From the user's perspective, double-clicking `game.exe` is identical to launching a native binary. No `wine game.exe`. No prefix wizardry.
 
-The logical structure that dictates how data is organized, stored, and retrieved on physical storage drives.
+**Syscall interception — eBPF-assisted.** eBPF programs sit on the syscall path to route NT-style calls into the personality layer without a heavyweight ptrace-based interposer.
 
-## Security and Access Control
+## The hard problem: NT ↔ Linux structural mismatch
 
-Manages user accounts, enforces file permissions, and protects the system from unauthorized access or internal process interference.
+The single most foundational challenge. NT and Linux disagree at the primitive level:
 
-## The Shell (User Interface)
+| NT                                           | Linux                                                 |
+| -------------------------------------------- | ----------------------------------------------------- |
+| Object Manager (unified namespace)           | VFS + procfs + sysfs + ...                            |
+| Handle table (per-process opaque handles)    | File descriptor table (integers indexing struct file) |
+| Security descriptors (ACL-based, per-object) | UID/GID + mode bits + LSM hooks                       |
+| Section objects (mappable named memory)      | shm + mmap                                            |
+| APCs, IRQLs, IRPs                            | softirqs, tasklets, workqueues                        |
 
-The outermost layer. Whether a Command Line Interface (CLI) or a Graphical User Interface (GUI), this is the environment where you interact with the system and launch applications.
+The NT syscall personality layer is the bridge. It's not a translation table — it's a semantic adapter that has to preserve enough NT behavior that Win32 software and Windows kernel drivers cannot tell the difference.
+
+## Prior art being studied
+
+- **ReactOS** — open-source NT reimplementation; reference for NT object/handle semantics
+- **Windows Research Kernel** — authoritative reference for NT Executive internals
+- **LWN seccomp / PROT_NOSYSCALL proposals** — relevant patterns for syscall filtering and dispatch
+
+## Current status
+
+Research and architecture phase. No deadline pressure — correctness and depth over speed. The bootloader work (see [`bootloader/README.md`](./bootloader/README.md)) is foundational practice for understanding the boot path LibertyOS will eventually own end-to-end.
+
+## Glossary
+
+`SSDT` System Service Descriptor Table · `NT Executive` NT kernel-mode core · `WDM` Windows Driver Model · `DSE` Driver Signature Enforcement · `EPT` Extended Page Tables (Intel VT-x) · `VMX root/non-root` hypervisor vs. guest CPU mode · `VTL 0/1` Virtual Trust Levels (Hyper-V VBS concept) · `pico processes` minimal NT processes (used by WSL1) · `binfmt_misc` Linux mechanism to register interpreters for arbitrary binary formats · `io_uring` async I/O syscall interface · `BORE` Burst-Oriented Response Enhancer scheduler · `LSM` Linux Security Module framework · `VKD3D-Proton` DX12→Vulkan translation layer · `eBPF` in-kernel programmable VM · `BEDaisy.sys` BattlEye kernel driver
