@@ -1,4 +1,4 @@
-# Ventrue Tech Operative System
+# Liberty OS Operative System
 
 ## Bootloader
 
